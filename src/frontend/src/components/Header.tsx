@@ -16,8 +16,8 @@ import {
   TableHeader,
   TableRow,
 } from "@/components/ui/table";
-import { ScanSearch, Shield } from "lucide-react";
-import { useState } from "react";
+import { Clock, Loader2, ScanSearch, Shield } from "lucide-react";
+import { useEffect, useState } from "react";
 
 const SCAN_RESULTS = [
   {
@@ -34,7 +34,7 @@ const SCAN_RESULTS = [
     signal: "BUY",
     strength: 78,
     reason: "MACD bullish divergence + support hold",
-    timeframe: "1h",
+    timeframe: "4h",
   },
   {
     symbol: "SOL",
@@ -50,15 +50,15 @@ const SCAN_RESULTS = [
     signal: "BUY",
     strength: 71,
     reason: "ADX trending up + MFI oversold bounce",
-    timeframe: "1d",
+    timeframe: "4h",
   },
   {
     symbol: "ADA",
-    price: "$0.6520",
+    price: "$0.65200",
     signal: "BUY",
     strength: 65,
     reason: "RSI(7) oversold + Volume spike detected",
-    timeframe: "1h",
+    timeframe: "4h",
   },
   {
     symbol: "XRP",
@@ -70,11 +70,11 @@ const SCAN_RESULTS = [
   },
   {
     symbol: "DOGE",
-    price: "$0.1840",
+    price: "$0.18400",
     signal: "BUY",
     strength: 68,
     reason: "BB squeeze + Momentum building",
-    timeframe: "1h",
+    timeframe: "4h",
   },
   {
     symbol: "AVAX",
@@ -85,20 +85,20 @@ const SCAN_RESULTS = [
     timeframe: "4h",
   },
   {
-    symbol: "MATIC",
-    price: "$0.4210",
+    symbol: "POL",
+    price: "$0.42100",
     signal: "BUY",
     strength: 72,
     reason: "CCI oversold recovery + VWAP hold",
-    timeframe: "1h",
+    timeframe: "4h",
   },
   {
     symbol: "DOT",
-    price: "$6.48",
+    price: "$6.480",
     signal: "BUY",
     strength: 69,
     reason: "Aroon bullish crossover + EMA support",
-    timeframe: "1d",
+    timeframe: "4h",
   },
 ];
 
@@ -152,6 +152,32 @@ function getSignalBadgeStyle(signal: string): React.CSSProperties {
 export function Header() {
   const [aiScanOpen, setAiScanOpen] = useState(false);
   const [tosOpen, setTosOpen] = useState(false);
+  const [livePrices, setLivePrices] = useState<Record<string, string>>({});
+  const [pricesLoading, setPricesLoading] = useState(false);
+
+  useEffect(() => {
+    if (!aiScanOpen) return;
+    setPricesLoading(true);
+    const symbols = SCAN_RESULTS.map((r) => `"${r.symbol}USDT"`).join(",");
+    fetch(`https://api.binance.com/api/v3/ticker/price?symbols=[${symbols}]`)
+      .then((r) => r.json())
+      .then((data: { symbol: string; price: string }[]) => {
+        const prices: Record<string, string> = {};
+        for (const d of data) {
+          const base = d.symbol.replace("USDT", "");
+          const p = Number.parseFloat(d.price);
+          prices[base] =
+            p >= 1000
+              ? `$${p.toLocaleString("en-US", { maximumFractionDigits: 0 })}`
+              : p >= 1
+                ? `$${p.toFixed(3)}`
+                : `$${p.toFixed(5)}`;
+        }
+        setLivePrices(prices);
+      })
+      .catch(() => {})
+      .finally(() => setPricesLoading(false));
+  }, [aiScanOpen]);
 
   return (
     <>
@@ -179,7 +205,6 @@ export function Header() {
 
         {/* Center — action buttons */}
         <div className="flex items-center gap-2">
-          {/* AI Scan button */}
           <Button
             size="sm"
             onClick={() => setAiScanOpen(true)}
@@ -196,7 +221,6 @@ export function Header() {
             AI Scan
           </Button>
 
-          {/* Terms button */}
           <Button
             size="sm"
             onClick={() => setTosOpen(true)}
@@ -256,19 +280,32 @@ export function Header() {
               >
                 <ScanSearch className="w-4 h-4" style={{ color: "#22C55E" }} />
               </div>
-              <div>
-                <DialogTitle
-                  className="text-base font-bold"
-                  style={{ color: "#E8F0FA" }}
-                >
-                  AI Scan — Buy Zone Alerts
-                </DialogTitle>
+              <div className="flex-1">
+                <div className="flex items-center gap-2">
+                  <DialogTitle
+                    className="text-base font-bold"
+                    style={{ color: "#E8F0FA" }}
+                  >
+                    AI Scan — Buy Zone Alerts
+                  </DialogTitle>
+                  {/* 4h timeframe badge */}
+                  <Badge
+                    className="text-[9px] px-2 py-0.5 font-bold gap-1"
+                    style={{
+                      background: "rgba(96,165,250,0.15)",
+                      color: "#60A5FA",
+                      border: "1px solid rgba(96,165,250,0.3)",
+                    }}
+                  >
+                    <Clock className="w-2.5 h-2.5" />
+                    Analysis: 4h Chart
+                  </Badge>
+                </div>
                 <p
                   className="text-[11px] mt-0.5"
                   style={{ color: "oklch(0.55 0.04 240)" }}
                 >
-                  Coins currently showing strong buy signals based on AI signal
-                  engine
+                  Coins showing strong buy signals on the 4-hour timeframe
                 </p>
               </div>
             </div>
@@ -293,7 +330,30 @@ export function Header() {
                           className="text-[11px] font-bold h-8"
                           style={{ color: "oklch(0.55 0.04 240)" }}
                         >
-                          {h}
+                          {h === "Price" ? (
+                            <span className="flex items-center gap-1">
+                              {h}
+                              {Object.keys(livePrices).length > 0 && (
+                                <span
+                                  className="text-[8px] font-bold px-1 rounded"
+                                  style={{
+                                    background: "rgba(34,197,94,0.15)",
+                                    color: "#22C55E",
+                                  }}
+                                >
+                                  LIVE
+                                </span>
+                              )}
+                              {pricesLoading && (
+                                <Loader2
+                                  className="w-2.5 h-2.5 animate-spin"
+                                  style={{ color: "#22C55E" }}
+                                />
+                              )}
+                            </span>
+                          ) : (
+                            h
+                          )}
                         </TableHead>
                       ))}
                     </TableRow>
@@ -316,9 +376,13 @@ export function Header() {
                         <TableCell className="py-2">
                           <span
                             className="text-xs font-mono"
-                            style={{ color: "#8FA4B8" }}
+                            style={{
+                              color: livePrices[row.symbol]
+                                ? "#22C55E"
+                                : "#8FA4B8",
+                            }}
                           >
-                            {row.price}
+                            {livePrices[row.symbol] ?? row.price}
                           </span>
                         </TableCell>
                         <TableCell className="py-2">
@@ -359,8 +423,9 @@ export function Header() {
                           <span
                             className="text-[10px] font-semibold px-1.5 py-0.5 rounded"
                             style={{
-                              background: "oklch(0.16 0.035 240)",
-                              color: "oklch(0.67 0.04 240)",
+                              background: "rgba(96,165,250,0.12)",
+                              color: "#60A5FA",
+                              border: "1px solid rgba(96,165,250,0.25)",
                             }}
                           >
                             {row.timeframe}
@@ -382,7 +447,8 @@ export function Header() {
               className="text-[10px]"
               style={{ color: "oklch(0.45 0.04 240)" }}
             >
-              ⚠️ For informational purposes only. Not financial advice.
+              ⚠️ For informational purposes only. Prices from Binance API. Not
+              financial advice.
             </p>
             <Button
               size="sm"

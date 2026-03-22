@@ -10,7 +10,7 @@ import {
 } from "lucide-react";
 import { useNews } from "../hooks/useQueries";
 import type { Coin, KlineData } from "../types/crypto";
-import { computeSignal, getSignalColors } from "../utils/signals";
+import { computeSignal, fmtPrice, getSignalColors } from "../utils/signals";
 
 interface RightPanelProps {
   selectedCoin: Coin | null;
@@ -39,8 +39,6 @@ function SignalGauge({ score }: { score: number }) {
   const cx = 90;
   const cy = 80;
   const r = 62;
-  // Arc path: semicircle curving UPWARD (rainbow/speedometer shape)
-  // sweep-flag=1 means clockwise, which from left to right goes upward
   const arcPath = `M ${cx - r} ${cy} A ${r} ${r} 0 0 1 ${cx + r} ${cy}`;
 
   // Needle angle: score 0 = left (180°), score 100 = right (0°)
@@ -74,7 +72,6 @@ function SignalGauge({ score }: { score: number }) {
           </linearGradient>
         </defs>
 
-        {/* Background track arc */}
         <path
           d={arcPath}
           stroke="rgba(255,255,255,0.08)"
@@ -82,8 +79,6 @@ function SignalGauge({ score }: { score: number }) {
           fill="none"
           strokeLinecap="round"
         />
-
-        {/* Colored gradient arc */}
         <path
           d={arcPath}
           stroke="url(#gaugeGrad)"
@@ -92,7 +87,6 @@ function SignalGauge({ score }: { score: number }) {
           strokeLinecap="round"
         />
 
-        {/* Needle shadow */}
         <line
           x1={cx}
           y1={cy}
@@ -102,7 +96,6 @@ function SignalGauge({ score }: { score: number }) {
           strokeWidth="2.5"
           strokeLinecap="round"
         />
-        {/* Needle */}
         <line
           x1={cx}
           y1={cy}
@@ -112,14 +105,10 @@ function SignalGauge({ score }: { score: number }) {
           strokeWidth="2"
           strokeLinecap="round"
         />
-        {/* Needle pivot */}
         <circle cx={cx} cy={cy} r="4" fill="#E8F0FA" />
         <circle cx={cx} cy={cy} r="2.5" fill="#0E1823" />
-
-        {/* Needle tip dot */}
         <circle cx={needleX} cy={needleY} r="2.5" fill={scoreColor} />
 
-        {/* SELL label */}
         <text
           x={cx - r + 4}
           y={cy + 16}
@@ -130,8 +119,6 @@ function SignalGauge({ score }: { score: number }) {
         >
           SELL
         </text>
-
-        {/* BUY label */}
         <text
           x={cx + r - 4}
           y={cy + 16}
@@ -142,8 +129,6 @@ function SignalGauge({ score }: { score: number }) {
         >
           BUY
         </text>
-
-        {/* Score number */}
         <text
           x={cx}
           y={cy - 22}
@@ -155,8 +140,6 @@ function SignalGauge({ score }: { score: number }) {
         >
           {score}
         </text>
-
-        {/* /100 subscript */}
         <text
           x={cx}
           y={cy - 8}
@@ -169,7 +152,6 @@ function SignalGauge({ score }: { score: number }) {
         </text>
       </svg>
 
-      {/* Zone label */}
       <span
         className="text-[11px] font-black tracking-widest -mt-2"
         style={{ color: zoneColor }}
@@ -256,7 +238,7 @@ export function RightPanel({ selectedCoin, klineData }: RightPanelProps) {
                 }}
                 data-ocid="signal.card"
               >
-                {/* Semicircular gauge */}
+                {/* Gauge */}
                 <div
                   className="flex justify-center pt-3 pb-1"
                   style={{ background: "rgba(0,0,0,0.15)" }}
@@ -352,9 +334,89 @@ export function RightPanel({ selectedCoin, klineData }: RightPanelProps) {
                     </div>
                   )}
 
+                  {/* TRADE LEVELS */}
+                  {signal.entryPrice != null && (
+                    <div
+                      className="mt-3 rounded overflow-hidden"
+                      style={{ background: "rgba(0,0,0,0.2)" }}
+                    >
+                      <div
+                        className="px-2 py-1 text-[9px] font-bold tracking-widest"
+                        style={{
+                          color: "rgba(255,255,255,0.3)",
+                          borderBottom: "1px solid rgba(255,255,255,0.06)",
+                        }}
+                      >
+                        TRADE LEVELS
+                      </div>
+                      <div className="px-2 py-1.5 space-y-1.5">
+                        <div className="flex justify-between text-[11px]">
+                          <span style={{ color: "rgba(255,255,255,0.5)" }}>
+                            Entry
+                          </span>
+                          <span
+                            className="font-bold font-mono"
+                            style={{ color: "#E8F0FA" }}
+                          >
+                            {fmtPrice(signal.entryPrice)}
+                          </span>
+                        </div>
+                        {signal.takeProfitPrice != null && (
+                          <div className="flex justify-between text-[11px]">
+                            <span style={{ color: "#22C55E" }}>
+                              Take Profit
+                            </span>
+                            <span
+                              className="font-bold font-mono"
+                              style={{ color: "#22C55E" }}
+                            >
+                              {fmtPrice(signal.takeProfitPrice)}
+                            </span>
+                          </div>
+                        )}
+                        {signal.stopLossPrice != null && (
+                          <div className="flex justify-between text-[11px]">
+                            <span style={{ color: "#EF4444" }}>Stop Loss</span>
+                            <span
+                              className="font-bold font-mono"
+                              style={{ color: "#EF4444" }}
+                            >
+                              {fmtPrice(signal.stopLossPrice)}
+                            </span>
+                          </div>
+                        )}
+                        {signal.riskRewardRatio != null && (
+                          <div
+                            className="flex justify-between text-[11px] pt-0.5"
+                            style={{
+                              borderTop: "1px solid rgba(255,255,255,0.06)",
+                            }}
+                          >
+                            <span style={{ color: "rgba(255,255,255,0.4)" }}>
+                              Risk/Reward
+                            </span>
+                            <span
+                              className="font-bold"
+                              style={{
+                                color:
+                                  signal.riskRewardRatio >= 2
+                                    ? "#22C55E"
+                                    : signal.riskRewardRatio >= 1.5
+                                      ? "#F5C542"
+                                      : "#FB923C",
+                              }}
+                            >
+                              1:{signal.riskRewardRatio.toFixed(2)}
+                            </span>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  )}
+
                   {/* Indicator details table */}
                   <div
-                    className="rounded overflow-hidden"
+                    className="rounded overflow-hidden mt-3"
                     style={{ background: "rgba(0,0,0,0.2)" }}
                   >
                     <table className="w-full text-[10px]">

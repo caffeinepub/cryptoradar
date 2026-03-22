@@ -1,5 +1,4 @@
 import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
 import {
   DropdownMenu,
   DropdownMenuContent,
@@ -31,6 +30,7 @@ import {
   Eye,
   EyeOff,
   Loader2,
+  Plus,
   Settings2,
   TrendingUp,
   X,
@@ -96,6 +96,14 @@ const TF_INTERVAL: Record<string, number> = {
   "1w": 604800,
 };
 
+// Multi-instance indicator model
+export interface IndicatorInstance {
+  instanceId: string;
+  id: IndicatorId;
+  params: Record<string, number>;
+  hidden: boolean;
+}
+
 const DEFAULT_PARAMS: Record<string, Record<string, number>> = {
   RSI: { period: 14 },
   MACD: { fast: 12, slow: 26, signal: 9 },
@@ -113,12 +121,12 @@ const DEFAULT_PARAMS: Record<string, Record<string, number>> = {
   DEMA: { period: 20 },
   TEMA: { period: 20 },
   HULL_MA: { period: 20 },
-  VWAP: {},
-  ICHIMOKU: {},
-  PSAR: {},
+  VWAP: { anchorPeriod: 1 },
+  ICHIMOKU: { tenkan: 9, kijun: 26, senkouB: 52 },
+  PSAR: { step: 2, maxStep: 20 },
   SMC: { lookback: 50 },
-  OBV: {},
-  PIVOT: {},
+  OBV: { smoothing: 3 },
+  PIVOT: { levels: 3 },
 };
 
 function getChipLabel(id: IndicatorId, params: Record<string, number>): string {
@@ -158,9 +166,33 @@ function getChipLabel(id: IndicatorId, params: Record<string, number>): string {
       return `HMA(${p.period ?? 20})`;
     case "SMC":
       return `SMC(${p.lookback ?? 50})`;
+    case "VWAP":
+      return "VWAP";
+    case "ICHIMOKU":
+      return `Ichi(${p.tenkan ?? 9},${p.kijun ?? 26})`;
+    case "PSAR":
+      return `PSAR(${p.step ?? 2})`;
+    case "OBV":
+      return `OBV(${p.smoothing ?? 3})`;
+    case "PIVOT":
+      return `Pivot(${p.levels ?? 3})`;
     default:
       return INDICATOR_LABELS[id] ?? id;
   }
+}
+
+function getInstanceLabel(
+  instance: IndicatorInstance,
+  allInstances: IndicatorInstance[],
+): string {
+  const sameType = allInstances.filter((i) => i.id === instance.id);
+  const base = getChipLabel(instance.id, instance.params);
+  if (sameType.length > 1) {
+    const num =
+      sameType.findIndex((i) => i.instanceId === instance.instanceId) + 1;
+    return `${base} #${num}`;
+  }
+  return base;
 }
 
 function alignTimeSeries(
@@ -220,10 +252,10 @@ function calcATRArr(
 function calcPSARArr(
   highs: number[],
   lows: number[],
+  af0 = 0.02,
+  afMax = 0.2,
 ): { value: number; bull: boolean }[] {
   const result: { value: number; bull: boolean }[] = [];
-  const af0 = 0.02;
-  const afMax = 0.2;
   let bull = true;
   let af = af0;
   let ep = lows[0];
@@ -289,24 +321,25 @@ const CHART_OPTIONS = {
 };
 
 interface SubPanelProps {
-  indicatorId: IndicatorId;
+  instance: IndicatorInstance;
+  label: string;
   klineData: KlineData[];
   mainChartRef: React.RefObject<IChartApi | null>;
-  params: Record<string, number>;
   chartKey: number;
 }
 
 function SubPanel({
-  indicatorId,
+  instance,
+  label,
   klineData,
   mainChartRef,
-  params,
   chartKey,
 }: SubPanelProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
+  const { id: indicatorId, params } = instance;
 
-  // biome-ignore lint/correctness/useExhaustiveDependencies: chartKey is used as a re-trigger
+  // biome-ignore lint/correctness/useExhaustiveDependencies: chartKey triggers re-render
   useEffect(() => {
     if (!containerRef.current || !klineData.length) return;
 
@@ -352,6 +385,7 @@ function SubPanel({
           priceLineVisible: false,
           lastValueVisible: true,
         });
+        // Use full klineData alignment to avoid lag at the end
         series.setData(alignTimeSeries(klineData, values) as any);
         series.createPriceLine({
           price: 70,
@@ -475,7 +509,18 @@ function SubPanel({
           })
           .setData(alignTimeSeries(klineData, values) as any);
       } else if (indicatorId === "OBV") {
-        const values = OBV.calculate({ close: closes, volume: volumes });
+        const rawValues = OBV.calculate({ close: closes, volume: volumes });
+        // Apply smoothing SMA
+        const smoothingPeriod = params.smoothing ?? 3;
+        let values = rawValues;
+        if (smoothingPeriod > 1 && rawValues.length >= smoothingPeriod) {
+          const smoothed: number[] = [];
+          for (let i = smoothingPeriod - 1; i < rawValues.length; i++) {
+            const slice = rawValues.slice(i - smoothingPeriod + 1, i + 1);
+            smoothed.push(slice.reduce((a, b) => a + b, 0) / smoothingPeriod);
+          }
+          values = smoothed;
+        }
         chart
           .addSeries(LineSeries, {
             color: WHITE,
@@ -673,6 +718,9 @@ function SubPanel({
           const s1 = 2 * pivot - prev.high;
           const r2 = pivot + (prev.high - prev.low);
           const s2 = pivot - (prev.high - prev.low);
+          const r3 = pivot + 2 * (prev.high - prev.low);
+          const s3 = pivot - 2 * (prev.high - prev.low);
+          const numLevels = params.levels ?? 3;
           const series = chart.addSeries(LineSeries, {
             color: YELLOW,
             lineWidth: 1,
@@ -682,13 +730,24 @@ function SubPanel({
           series.setData(
             klineData.map((k) => ({ time: k.time, value: pivot })) as any,
           );
-          for (const { price, color, lbl } of [
+          const allLevels = [
             { price: pivot, color: YELLOW, lbl: "P" },
             { price: r1, color: RED, lbl: "R1" },
-            { price: r2, color: `${RED}99`, lbl: "R2" },
             { price: s1, color: GREEN, lbl: "S1" },
-            { price: s2, color: `${GREEN}99`, lbl: "S2" },
-          ]) {
+            ...(numLevels >= 2
+              ? [
+                  { price: r2, color: `${RED}99`, lbl: "R2" },
+                  { price: s2, color: `${GREEN}99`, lbl: "S2" },
+                ]
+              : []),
+            ...(numLevels >= 3
+              ? [
+                  { price: r3, color: `${RED}55`, lbl: "R3" },
+                  { price: s3, color: `${GREEN}55`, lbl: "S3" },
+                ]
+              : []),
+          ];
+          for (const { price, color, lbl } of allLevels) {
             series.createPriceLine({
               price,
               color,
@@ -700,13 +759,12 @@ function SubPanel({
           }
         }
       }
-
-      chart.timeScale().fitContent();
+      // NOTE: fitContent() intentionally removed — sync with main chart below handles the range
     } catch (_e) {
       // Ignore indicator errors
     }
 
-    // Sync with main chart
+    // Sync with main chart: apply current range immediately, then subscribe
     const mainChart = mainChartRef.current;
     let syncHandler: ((range: any) => void) | null = null;
     if (mainChart) {
@@ -747,7 +805,7 @@ function SubPanel({
         chartRef.current = null;
       }
     };
-  }, [indicatorId, klineData, params, mainChartRef, chartKey]);
+  }, [instance, klineData, mainChartRef, chartKey]);
 
   return (
     <div className="border-t" style={{ borderColor: CHART_GRID }}>
@@ -755,7 +813,7 @@ function SubPanel({
         className="px-3 py-0.5 text-[9px] font-bold tracking-wider"
         style={{ background: "#0A1520", color: CHART_TEXT }}
       >
-        {INDICATOR_LABELS[indicatorId].toUpperCase()}
+        {label.toUpperCase()}
       </div>
       <div ref={containerRef} style={{ height: 110 }} />
     </div>
@@ -778,63 +836,65 @@ export function ChartPanel({
   isLoading,
 }: ChartPanelProps) {
   const [chartType, setChartType] = useState<ChartType>("candlestick");
-  const [selectedIndicators, setSelectedIndicators] = useState<
-    Set<IndicatorId>
-  >(new Set(["EMA", "RSI"]));
-  const [indicatorParams, setIndicatorParams] = useState<
-    Record<string, Record<string, number>>
-  >(() => {
-    const p: Record<string, Record<string, number>> = {};
-    for (const id of Object.keys(DEFAULT_PARAMS)) {
-      p[id] = { ...DEFAULT_PARAMS[id] };
-    }
-    return p;
-  });
-  const [hiddenIndicators, setHiddenIndicators] = useState<Set<IndicatorId>>(
-    new Set(),
-  );
+
+  // Multi-instance indicator state
+  const [instances, setInstances] = useState<IndicatorInstance[]>(() => [
+    {
+      instanceId: "EMA_0",
+      id: "EMA",
+      params: { ...DEFAULT_PARAMS.EMA },
+      hidden: false,
+    },
+    {
+      instanceId: "RSI_0",
+      id: "RSI",
+      params: { ...DEFAULT_PARAMS.RSI },
+      hidden: false,
+    },
+  ]);
 
   const [chartKey, setChartKey] = useState(0);
   const mainContainerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
 
-  const toggleIndicator = useCallback((id: IndicatorId) => {
-    setSelectedIndicators((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
+  const addInstance = useCallback((id: IndicatorId) => {
+    const instanceId = `${id}_${Date.now()}`;
+    setInstances((prev) => [
+      ...prev,
+      {
+        instanceId,
+        id,
+        params: { ...(DEFAULT_PARAMS[id] ?? {}) },
+        hidden: false,
+      },
+    ]);
   }, []);
 
-  const toggleVisibility = useCallback((id: IndicatorId) => {
-    setHiddenIndicators((prev) => {
-      const next = new Set(prev);
-      if (next.has(id)) next.delete(id);
-      else next.add(id);
-      return next;
-    });
+  const removeInstance = useCallback((instanceId: string) => {
+    setInstances((prev) =>
+      prev.filter((inst) => inst.instanceId !== instanceId),
+    );
   }, []);
 
-  const removeIndicator = useCallback((id: IndicatorId) => {
-    setSelectedIndicators((prev) => {
-      const next = new Set(prev);
-      next.delete(id);
-      return next;
-    });
-    setHiddenIndicators((prev) => {
-      const next = new Set(prev);
-      next.delete(id);
-      return next;
-    });
+  const toggleInstanceVisibility = useCallback((instanceId: string) => {
+    setInstances((prev) =>
+      prev.map((inst) =>
+        inst.instanceId === instanceId
+          ? { ...inst, hidden: !inst.hidden }
+          : inst,
+      ),
+    );
   }, []);
 
-  const updateParam = useCallback(
-    (id: IndicatorId, key: string, value: number) => {
-      setIndicatorParams((prev) => ({
-        ...prev,
-        [id]: { ...(prev[id] ?? {}), [key]: value },
-      }));
+  const updateInstanceParam = useCallback(
+    (instanceId: string, key: string, value: number) => {
+      setInstances((prev) =>
+        prev.map((inst) =>
+          inst.instanceId === instanceId
+            ? { ...inst, params: { ...inst.params, [key]: value } }
+            : inst,
+        ),
+      );
     },
     [],
   );
@@ -859,10 +919,6 @@ export function ChartPanel({
     });
     chartRef.current = chart;
     setTimeout(() => setChartKey((k) => k + 1), 50);
-
-    const p = (id: IndicatorId) =>
-      indicatorParams[id] ?? DEFAULT_PARAMS[id] ?? {};
-    const isHidden = (id: IndicatorId) => hiddenIndicators.has(id);
 
     try {
       // --- Main series ---
@@ -918,7 +974,6 @@ export function ChartPanel({
           series.setData(
             bricks.map((b, idx) => ({
               time: (baseTime + idx * interval) as any,
-              // Fill body fully so no wick gap visible
               open: b.up ? b.low : b.high,
               high: b.high,
               low: b.low,
@@ -968,514 +1023,513 @@ export function ChartPanel({
         );
       }
 
-      // --- Overlay indicators ---
-      if (selectedIndicators.has("SMA") && !isHidden("SMA")) {
-        const period = p("SMA").period ?? 20;
-        const values = SMA.calculate({ period, values: closes });
-        chart
-          .addSeries(LineSeries, {
-            color: YELLOW,
-            lineWidth: 1,
-            priceLineVisible: false,
-            lastValueVisible: false,
-          })
-          .setData(alignTimeSeries(klineData, values) as any);
-      }
-      if (selectedIndicators.has("EMA") && !isHidden("EMA")) {
-        const period = p("EMA").period ?? 20;
-        const values = calcEMA(closes, period);
-        chart
-          .addSeries(LineSeries, {
-            color: CYAN,
-            lineWidth: 1,
-            priceLineVisible: false,
-            lastValueVisible: false,
-          })
-          .setData(alignTimeSeries(klineData, values) as any);
-      }
-      if (selectedIndicators.has("BB") && !isHidden("BB")) {
-        const period = p("BB").period ?? 20;
-        const stdDev = p("BB").stdDev ?? 2;
-        const bbData = BollingerBands.calculate({
-          period,
-          stdDev,
-          values: closes,
-        });
-        const offset = klineData.length - bbData.length;
-        chart
-          .addSeries(LineSeries, {
-            color: `${BLUE}99`,
-            lineWidth: 1,
-            priceLineVisible: false,
-            lastValueVisible: false,
-            lineStyle: LineStyle.Dashed,
-          })
-          .setData(
-            bbData.map((d, i) => ({
-              time: klineData[i + offset].time,
-              value: d.upper,
-            })) as any,
-          );
-        chart
-          .addSeries(LineSeries, {
-            color: `${BLUE}66`,
-            lineWidth: 1,
-            priceLineVisible: false,
-            lastValueVisible: false,
-          })
-          .setData(
-            bbData.map((d, i) => ({
-              time: klineData[i + offset].time,
-              value: d.middle,
-            })) as any,
-          );
-        chart
-          .addSeries(LineSeries, {
-            color: `${BLUE}99`,
-            lineWidth: 1,
-            priceLineVisible: false,
-            lastValueVisible: false,
-            lineStyle: LineStyle.Dashed,
-          })
-          .setData(
-            bbData.map((d, i) => ({
-              time: klineData[i + offset].time,
-              value: d.lower,
-            })) as any,
-          );
-      }
-      if (selectedIndicators.has("VWAP") && !isHidden("VWAP")) {
-        const typicalPrices = klineData.map(
-          (k) => (k.high + k.low + k.close) / 3,
-        );
-        let cumTPV = 0;
-        let cumVol = 0;
-        const vwapData = klineData.map((k, i) => {
-          cumTPV += typicalPrices[i] * k.volume;
-          cumVol += k.volume;
-          return {
-            time: k.time,
-            value: cumVol > 0 ? cumTPV / cumVol : typicalPrices[i],
-          };
-        });
-        chart
-          .addSeries(LineSeries, {
-            color: YELLOW,
-            lineWidth: 2,
-            priceLineVisible: false,
-            lastValueVisible: true,
-          })
-          .setData(vwapData as any);
-      }
-      if (selectedIndicators.has("ICHIMOKU") && !isHidden("ICHIMOKU")) {
-        const tenkanPeriod = 9;
-        const kijunPeriod = 26;
-        const senkouBPeriod = 52;
-        function ichimokuLine(
-          data: KlineData[],
-          period: number,
-        ): { time: number; value: number }[] {
-          return data
-            .map((k, i) => {
-              if (i < period - 1) return null;
-              const slice = data.slice(i - period + 1, i + 1);
-              const high = Math.max(...slice.map((d) => d.high));
-              const low = Math.min(...slice.map((d) => d.low));
-              return { time: k.time, value: (high + low) / 2 };
+      // --- Overlay & SMC indicators from instances ---
+      for (const inst of instances) {
+        if (inst.hidden) continue;
+        // Skip panel indicators (they render in SubPanel)
+        if (PANEL_INDICATORS.includes(inst.id)) continue;
+
+        const p = inst.params;
+
+        if (inst.id === "SMA") {
+          const period = p.period ?? 20;
+          const values = SMA.calculate({ period, values: closes });
+          chart
+            .addSeries(LineSeries, {
+              color: YELLOW,
+              lineWidth: 1,
+              priceLineVisible: false,
+              lastValueVisible: false,
             })
-            .filter(Boolean) as { time: number; value: number }[];
-        }
-        const tenkan = ichimokuLine(klineData, tenkanPeriod);
-        const kijun = ichimokuLine(klineData, kijunPeriod);
-        const senkouB = ichimokuLine(klineData, senkouBPeriod);
-        chart
-          .addSeries(LineSeries, {
-            color: BLUE,
-            lineWidth: 1,
-            priceLineVisible: false,
-            lastValueVisible: false,
-          })
-          .setData(tenkan as any);
-        chart
-          .addSeries(LineSeries, {
-            color: ORANGE,
-            lineWidth: 1,
-            priceLineVisible: false,
-            lastValueVisible: false,
-          })
-          .setData(kijun as any);
-        chart
-          .addSeries(LineSeries, {
-            color: `${GREEN}77`,
-            lineWidth: 1,
-            priceLineVisible: false,
-            lastValueVisible: false,
-          })
-          .setData(senkouB as any);
-      }
-      if (selectedIndicators.has("PSAR") && !isHidden("PSAR")) {
-        const psarData = calcPSARArr(highs, lows);
-        const offset = klineData.length - psarData.length;
-        const bullData = psarData
-          .map((d, i) => ({
-            time: klineData[i + offset].time,
-            value: d.bull ? d.value : null,
-          }))
-          .filter((d) => d.value !== null);
-        const bearData = psarData
-          .map((d, i) => ({
-            time: klineData[i + offset].time,
-            value: !d.bull ? d.value : null,
-          }))
-          .filter((d) => d.value !== null);
-        chart
-          .addSeries(LineSeries, {
-            color: GREEN,
-            lineWidth: 1,
-            lineStyle: LineStyle.Dotted,
-            priceLineVisible: false,
-            lastValueVisible: false,
-          })
-          .setData(bullData as any);
-        chart
-          .addSeries(LineSeries, {
-            color: RED,
-            lineWidth: 1,
-            lineStyle: LineStyle.Dotted,
-            priceLineVisible: false,
-            lastValueVisible: false,
-          })
-          .setData(bearData as any);
-      }
-      if (selectedIndicators.has("SUPERTREND") && !isHidden("SUPERTREND")) {
-        const stPeriod = p("SUPERTREND").period ?? 14;
-        const multiplier = p("SUPERTREND").multiplier ?? 3;
-        const atrValues = calcATRArr(highs, lows, closes, stPeriod);
-        const atrOffset = closes.length - atrValues.length;
-        const upperBand: number[] = [];
-        const lowerBand: number[] = [];
-        const supertrend: { value: number; bull: boolean }[] = [];
-        for (let i = 0; i < atrValues.length; i++) {
-          const idx = i + atrOffset;
-          const hl2 = (highs[idx] + lows[idx]) / 2;
-          upperBand.push(hl2 + multiplier * atrValues[i]);
-          lowerBand.push(hl2 - multiplier * atrValues[i]);
-        }
-        let bull = true;
-        for (let i = 0; i < atrValues.length; i++) {
-          const idx = i + atrOffset;
-          if (i > 0) {
-            const prevUpper = upperBand[i - 1];
-            const prevLower = lowerBand[i - 1];
-            upperBand[i] =
-              upperBand[i] < prevUpper || closes[idx - 1] > prevUpper
-                ? upperBand[i]
-                : prevUpper;
-            lowerBand[i] =
-              lowerBand[i] > prevLower || closes[idx - 1] < prevLower
-                ? lowerBand[i]
-                : prevLower;
-            if (
-              supertrend[i - 1].value === prevUpper &&
-              closes[idx] > upperBand[i]
-            )
-              bull = true;
-            else if (
-              supertrend[i - 1].value === prevLower &&
-              closes[idx] < lowerBand[i]
-            )
-              bull = false;
-          }
-          supertrend.push({ value: bull ? lowerBand[i] : upperBand[i], bull });
-        }
-        const bullST = supertrend
-          .map((d, i) => ({
-            time: klineData[i + atrOffset].time,
-            value: d.bull ? d.value : null,
-          }))
-          .filter((d) => d.value !== null);
-        const bearST = supertrend
-          .map((d, i) => ({
-            time: klineData[i + atrOffset].time,
-            value: !d.bull ? d.value : null,
-          }))
-          .filter((d) => d.value !== null);
-        chart
-          .addSeries(LineSeries, {
-            color: GREEN,
-            lineWidth: 2,
-            priceLineVisible: false,
-            lastValueVisible: false,
-          })
-          .setData(bullST as any);
-        chart
-          .addSeries(LineSeries, {
-            color: RED,
-            lineWidth: 2,
-            priceLineVisible: false,
-            lastValueVisible: false,
-          })
-          .setData(bearST as any);
-      }
-      if (selectedIndicators.has("DEMA") && !isHidden("DEMA")) {
-        const period = p("DEMA").period ?? 20;
-        const ema1 = calcEMA(closes, period);
-        const ema2 = calcEMA(ema1, period);
-        const dema = ema2.map((v, i) => {
-          const e1idx = ema1.length - ema2.length + i;
-          return 2 * ema1[e1idx] - v;
-        });
-        const offset = closes.length - dema.length;
-        chart
-          .addSeries(LineSeries, {
-            color: CYAN,
-            lineWidth: 1,
-            priceLineVisible: false,
-            lastValueVisible: false,
-          })
-          .setData(
-            dema.map((v, i) => ({
-              time: klineData[i + offset].time,
-              value: v,
-            })) as any,
-          );
-      }
-      if (selectedIndicators.has("TEMA") && !isHidden("TEMA")) {
-        const period = p("TEMA").period ?? 20;
-        const ema1 = calcEMA(closes, period);
-        const ema2 = calcEMA(ema1, period);
-        const ema3 = calcEMA(ema2, period);
-        const minLen = ema3.length;
-        const tema = ema3.map((v, i) => {
-          const e2idx = ema2.length - minLen + i;
-          const e1idx = ema1.length - minLen + i;
-          return 3 * ema1[e1idx] - 3 * ema2[e2idx] + v;
-        });
-        const offset = closes.length - tema.length;
-        chart
-          .addSeries(LineSeries, {
-            color: LIME,
-            lineWidth: 1,
-            priceLineVisible: false,
-            lastValueVisible: false,
-          })
-          .setData(
-            tema.map((v, i) => ({
-              time: klineData[i + offset].time,
-              value: v,
-            })) as any,
-          );
-      }
-      if (selectedIndicators.has("HULL_MA") && !isHidden("HULL_MA")) {
-        const n = p("HULL_MA").period ?? 20;
-        const halfN = Math.floor(n / 2);
-        const sqrtN = Math.round(Math.sqrt(n));
-        const wmaFull = calcWMA(closes, n);
-        const wmaHalf = calcWMA(closes, halfN);
-        const minLen = Math.min(wmaFull.length, wmaHalf.length);
-        const raw = Array.from(
-          { length: minLen },
-          (_, i) =>
-            2 * wmaHalf[wmaHalf.length - minLen + i] -
-            wmaFull[wmaFull.length - minLen + i],
-        );
-        const hull = calcWMA(raw, sqrtN);
-        const offset = closes.length - hull.length;
-        chart
-          .addSeries(LineSeries, {
-            color: ORANGE,
-            lineWidth: 2,
-            priceLineVisible: false,
-            lastValueVisible: false,
-          })
-          .setData(
-            hull.map((v, i) => ({
-              time: klineData[i + offset].time,
-              value: v,
-            })) as any,
-          );
-      }
-
-      // --- SMC Overlay (bounded segments) ---
-      if (selectedIndicators.has("SMC") && !isHidden("SMC")) {
-        const swingWindow = 5;
-        const smcParams = indicatorParams.SMC ?? DEFAULT_PARAMS.SMC ?? {};
-        const lookback = Math.min(
-          klineData.length,
-          (smcParams.lookback as number) ?? 50,
-        );
-        const slice = klineData.slice(klineData.length - lookback);
-        const swingHighs: { idx: number; price: number }[] = [];
-        const swingLows: { idx: number; price: number }[] = [];
-
-        for (let i = swingWindow; i < slice.length - swingWindow; i++) {
-          let isHigh = true;
-          let isLow = true;
-          for (let j = i - swingWindow; j <= i + swingWindow; j++) {
-            if (j === i) continue;
-            if (slice[j].high >= slice[i].high) isHigh = false;
-            if (slice[j].low <= slice[i].low) isLow = false;
-          }
-          if (isHigh) swingHighs.push({ idx: i, price: slice[i].high });
-          if (isLow) swingLows.push({ idx: i, price: slice[i].low });
-        }
-
-        const findBreak = (
-          fromIdx: number,
-          price: number,
-          isHighLevel: boolean,
-        ): number => {
-          for (let i = fromIdx + 1; i < slice.length; i++) {
-            if (isHighLevel && slice[i].close > price) return i;
-            if (!isHighLevel && slice[i].close < price) return i;
-          }
-          return slice.length - 1;
-        };
-
-        const drawSegment = (
-          t1: number,
-          t2: number,
-          price: number,
-          color: string,
-          lStyle: LineStyle,
-          lWidth: number,
-          label?: string,
-        ) => {
-          if (t1 >= t2) return;
-          // Main line
-          const seg = chart.addSeries(LineSeries, {
-            color,
-            lineWidth: lWidth as any,
-            lineStyle: lStyle,
-            priceLineVisible: false,
-            lastValueVisible: false,
-            crosshairMarkerVisible: false,
-            title: "",
+            .setData(alignTimeSeries(klineData, values) as any);
+        } else if (inst.id === "EMA") {
+          const period = p.period ?? 20;
+          const values = calcEMA(closes, period);
+          chart
+            .addSeries(LineSeries, {
+              color: CYAN,
+              lineWidth: 1,
+              priceLineVisible: false,
+              lastValueVisible: false,
+            })
+            .setData(alignTimeSeries(klineData, values) as any);
+        } else if (inst.id === "BB") {
+          const period = p.period ?? 20;
+          const stdDev = p.stdDev ?? 2;
+          const bbData = BollingerBands.calculate({
+            period,
+            stdDev,
+            values: closes,
           });
-          seg.setData([
-            { time: t1 as any, value: price },
-            { time: t2 as any, value: price },
-          ]);
-          // Label series at right end
-          if (label) {
-            const labelS = chart.addSeries(LineSeries, {
-              color: "transparent",
-              lineWidth: 1 as any,
+          const offset = klineData.length - bbData.length;
+          chart
+            .addSeries(LineSeries, {
+              color: `${BLUE}99`,
+              lineWidth: 1,
+              priceLineVisible: false,
+              lastValueVisible: false,
+              lineStyle: LineStyle.Dashed,
+            })
+            .setData(
+              bbData.map((d, i) => ({
+                time: klineData[i + offset].time,
+                value: d.upper,
+              })) as any,
+            );
+          chart
+            .addSeries(LineSeries, {
+              color: `${BLUE}66`,
+              lineWidth: 1,
+              priceLineVisible: false,
+              lastValueVisible: false,
+            })
+            .setData(
+              bbData.map((d, i) => ({
+                time: klineData[i + offset].time,
+                value: d.middle,
+              })) as any,
+            );
+          chart
+            .addSeries(LineSeries, {
+              color: `${BLUE}99`,
+              lineWidth: 1,
+              priceLineVisible: false,
+              lastValueVisible: false,
+              lineStyle: LineStyle.Dashed,
+            })
+            .setData(
+              bbData.map((d, i) => ({
+                time: klineData[i + offset].time,
+                value: d.lower,
+              })) as any,
+            );
+        } else if (inst.id === "VWAP") {
+          const typicalPrices = klineData.map(
+            (k) => (k.high + k.low + k.close) / 3,
+          );
+          let cumTPV = 0;
+          let cumVol = 0;
+          const vwapData = klineData.map((k, i) => {
+            cumTPV += typicalPrices[i] * k.volume;
+            cumVol += k.volume;
+            return {
+              time: k.time,
+              value: cumVol > 0 ? cumTPV / cumVol : typicalPrices[i],
+            };
+          });
+          chart
+            .addSeries(LineSeries, {
+              color: YELLOW,
+              lineWidth: 2,
               priceLineVisible: false,
               lastValueVisible: true,
-              crosshairMarkerVisible: false,
-              title: label,
+            })
+            .setData(vwapData as any);
+        } else if (inst.id === "ICHIMOKU") {
+          const tenkanPeriod = p.tenkan ?? 9;
+          const kijunPeriod = p.kijun ?? 26;
+          const senkouBPeriod = p.senkouB ?? 52;
+          function ichimokuLine(
+            data: KlineData[],
+            period: number,
+          ): { time: number; value: number }[] {
+            return data
+              .map((k, i) => {
+                if (i < period - 1) return null;
+                const slice = data.slice(i - period + 1, i + 1);
+                const high = Math.max(...slice.map((d) => d.high));
+                const low = Math.min(...slice.map((d) => d.low));
+                return { time: k.time, value: (high + low) / 2 };
+              })
+              .filter(Boolean) as { time: number; value: number }[];
+          }
+          const tenkan = ichimokuLine(klineData, tenkanPeriod);
+          const kijun = ichimokuLine(klineData, kijunPeriod);
+          const senkouB = ichimokuLine(klineData, senkouBPeriod);
+          chart
+            .addSeries(LineSeries, {
+              color: BLUE,
+              lineWidth: 1,
+              priceLineVisible: false,
+              lastValueVisible: false,
+            })
+            .setData(tenkan as any);
+          chart
+            .addSeries(LineSeries, {
+              color: ORANGE,
+              lineWidth: 1,
+              priceLineVisible: false,
+              lastValueVisible: false,
+            })
+            .setData(kijun as any);
+          chart
+            .addSeries(LineSeries, {
+              color: `${GREEN}77`,
+              lineWidth: 1,
+              priceLineVisible: false,
+              lastValueVisible: false,
+            })
+            .setData(senkouB as any);
+        } else if (inst.id === "PSAR") {
+          const af0 = (p.step ?? 2) / 100;
+          const afMax = (p.maxStep ?? 20) / 100;
+          const psarData = calcPSARArr(highs, lows, af0, afMax);
+          const offset = klineData.length - psarData.length;
+          const bullData = psarData
+            .map((d, i) => ({
+              time: klineData[i + offset].time,
+              value: d.bull ? d.value : null,
+            }))
+            .filter((d) => d.value !== null);
+          const bearData = psarData
+            .map((d, i) => ({
+              time: klineData[i + offset].time,
+              value: !d.bull ? d.value : null,
+            }))
+            .filter((d) => d.value !== null);
+          chart
+            .addSeries(LineSeries, {
+              color: GREEN,
+              lineWidth: 1,
+              lineStyle: LineStyle.Dotted,
+              priceLineVisible: false,
+              lastValueVisible: false,
+            })
+            .setData(bullData as any);
+          chart
+            .addSeries(LineSeries, {
+              color: RED,
+              lineWidth: 1,
+              lineStyle: LineStyle.Dotted,
+              priceLineVisible: false,
+              lastValueVisible: false,
+            })
+            .setData(bearData as any);
+        } else if (inst.id === "SUPERTREND") {
+          const stPeriod = p.period ?? 14;
+          const multiplier = p.multiplier ?? 3;
+          const atrValues = calcATRArr(highs, lows, closes, stPeriod);
+          const atrOffset = closes.length - atrValues.length;
+          const upperBand: number[] = [];
+          const lowerBand: number[] = [];
+          const supertrend: { value: number; bull: boolean }[] = [];
+          for (let i = 0; i < atrValues.length; i++) {
+            const idx = i + atrOffset;
+            const hl2 = (highs[idx] + lows[idx]) / 2;
+            upperBand.push(hl2 + multiplier * atrValues[i]);
+            lowerBand.push(hl2 - multiplier * atrValues[i]);
+          }
+          let bull = true;
+          for (let i = 0; i < atrValues.length; i++) {
+            const idx = i + atrOffset;
+            if (i > 0) {
+              const prevUpper = upperBand[i - 1];
+              const prevLower = lowerBand[i - 1];
+              upperBand[i] =
+                upperBand[i] < prevUpper || closes[idx - 1] > prevUpper
+                  ? upperBand[i]
+                  : prevUpper;
+              lowerBand[i] =
+                lowerBand[i] > prevLower || closes[idx - 1] < prevLower
+                  ? lowerBand[i]
+                  : prevLower;
+              if (
+                supertrend[i - 1].value === prevUpper &&
+                closes[idx] > upperBand[i]
+              )
+                bull = true;
+              else if (
+                supertrend[i - 1].value === prevLower &&
+                closes[idx] < lowerBand[i]
+              )
+                bull = false;
+            }
+            supertrend.push({
+              value: bull ? lowerBand[i] : upperBand[i],
+              bull,
             });
-            labelS.setData([
+          }
+          const bullST = supertrend
+            .map((d, i) => ({
+              time: klineData[i + atrOffset].time,
+              value: d.bull ? d.value : null,
+            }))
+            .filter((d) => d.value !== null);
+          const bearST = supertrend
+            .map((d, i) => ({
+              time: klineData[i + atrOffset].time,
+              value: !d.bull ? d.value : null,
+            }))
+            .filter((d) => d.value !== null);
+          chart
+            .addSeries(LineSeries, {
+              color: GREEN,
+              lineWidth: 2,
+              priceLineVisible: false,
+              lastValueVisible: false,
+            })
+            .setData(bullST as any);
+          chart
+            .addSeries(LineSeries, {
+              color: RED,
+              lineWidth: 2,
+              priceLineVisible: false,
+              lastValueVisible: false,
+            })
+            .setData(bearST as any);
+        } else if (inst.id === "DEMA") {
+          const period = p.period ?? 20;
+          const ema1 = calcEMA(closes, period);
+          const ema2 = calcEMA(ema1, period);
+          const dema = ema2.map((v, i) => {
+            const e1idx = ema1.length - ema2.length + i;
+            return 2 * ema1[e1idx] - v;
+          });
+          const offset = closes.length - dema.length;
+          chart
+            .addSeries(LineSeries, {
+              color: CYAN,
+              lineWidth: 1,
+              priceLineVisible: false,
+              lastValueVisible: false,
+            })
+            .setData(
+              dema.map((v, i) => ({
+                time: klineData[i + offset].time,
+                value: v,
+              })) as any,
+            );
+        } else if (inst.id === "TEMA") {
+          const period = p.period ?? 20;
+          const ema1 = calcEMA(closes, period);
+          const ema2 = calcEMA(ema1, period);
+          const ema3 = calcEMA(ema2, period);
+          const minLen = ema3.length;
+          const tema = ema3.map((v, i) => {
+            const e2idx = ema2.length - minLen + i;
+            const e1idx = ema1.length - minLen + i;
+            return 3 * ema1[e1idx] - 3 * ema2[e2idx] + v;
+          });
+          const offset = closes.length - tema.length;
+          chart
+            .addSeries(LineSeries, {
+              color: LIME,
+              lineWidth: 1,
+              priceLineVisible: false,
+              lastValueVisible: false,
+            })
+            .setData(
+              tema.map((v, i) => ({
+                time: klineData[i + offset].time,
+                value: v,
+              })) as any,
+            );
+        } else if (inst.id === "HULL_MA") {
+          const n = p.period ?? 20;
+          const halfN = Math.floor(n / 2);
+          const sqrtN = Math.round(Math.sqrt(n));
+          const wmaFull = calcWMA(closes, n);
+          const wmaHalf = calcWMA(closes, halfN);
+          const minLen = Math.min(wmaFull.length, wmaHalf.length);
+          const raw = Array.from(
+            { length: minLen },
+            (_, i) =>
+              2 * wmaHalf[wmaHalf.length - minLen + i] -
+              wmaFull[wmaFull.length - minLen + i],
+          );
+          const hull = calcWMA(raw, sqrtN);
+          const offset = closes.length - hull.length;
+          chart
+            .addSeries(LineSeries, {
+              color: ORANGE,
+              lineWidth: 2,
+              priceLineVisible: false,
+              lastValueVisible: false,
+            })
+            .setData(
+              hull.map((v, i) => ({
+                time: klineData[i + offset].time,
+                value: v,
+              })) as any,
+            );
+        } else if (inst.id === "SMC") {
+          // --- SMC Overlay (bounded segments) ---
+          const swingWindow = 5;
+          const lookback = Math.min(klineData.length, p.lookback ?? 50);
+          const slice = klineData.slice(klineData.length - lookback);
+          const swingHighs: { idx: number; price: number }[] = [];
+          const swingLows: { idx: number; price: number }[] = [];
+
+          for (let i = swingWindow; i < slice.length - swingWindow; i++) {
+            let isHigh = true;
+            let isLow = true;
+            for (let j = i - swingWindow; j <= i + swingWindow; j++) {
+              if (j === i) continue;
+              if (slice[j].high >= slice[i].high) isHigh = false;
+              if (slice[j].low <= slice[i].low) isLow = false;
+            }
+            if (isHigh) swingHighs.push({ idx: i, price: slice[i].high });
+            if (isLow) swingLows.push({ idx: i, price: slice[i].low });
+          }
+
+          const findBreak = (
+            fromIdx: number,
+            price: number,
+            isHighLevel: boolean,
+          ): number => {
+            for (let i = fromIdx + 1; i < slice.length; i++) {
+              if (isHighLevel && slice[i].close > price) return i;
+              if (!isHighLevel && slice[i].close < price) return i;
+            }
+            return slice.length - 1;
+          };
+
+          // Draw a segment line and add a text marker at the end point
+          const drawSegment = (
+            t1: number,
+            t2: number,
+            price: number,
+            color: string,
+            lStyle: LineStyle,
+            lWidth: number,
+            label?: string,
+          ) => {
+            if (t1 >= t2) return;
+            const seg = chart.addSeries(LineSeries, {
+              color,
+              lineWidth: lWidth as any,
+              lineStyle: lStyle,
+              priceLineVisible: false,
+              lastValueVisible: false,
+              crosshairMarkerVisible: false,
+              title: "",
+            });
+            seg.setData([
               { time: t1 as any, value: price },
               { time: t2 as any, value: price },
             ]);
-            labelS.applyOptions({ color });
-          }
-        };
+            // Place label as a marker directly on the chart at line end
+            if (label) {
+              try {
+                (seg as any).setMarkers([
+                  {
+                    time: t2 as any,
+                    position: "inBar" as any,
+                    color: color,
+                    shape: "text" as any,
+                    text: label,
+                    size: 1,
+                  },
+                ]);
+              } catch (_e) {
+                // fallback: no label if markers not supported
+              }
+            }
+          };
 
-        // Draw bounded swing high segments
-        for (const sh of swingHighs.slice(-8)) {
-          const breakIdx = findBreak(sh.idx, sh.price, true);
-          const isBroken = breakIdx < slice.length - 1;
-          const t1 = slice[sh.idx].time;
-          const t2 = slice[breakIdx].time;
-          drawSegment(
-            t1,
-            t2,
-            sh.price,
-            isBroken ? `${GREEN}66` : `${GREEN}AA`,
-            isBroken ? LineStyle.Dotted : LineStyle.Dashed,
-            1,
-          );
-        }
-
-        // Draw bounded swing low segments
-        for (const sl of swingLows.slice(-8)) {
-          const breakIdx = findBreak(sl.idx, sl.price, false);
-          const isBroken = breakIdx < slice.length - 1;
-          const t1 = slice[sl.idx].time;
-          const t2 = slice[breakIdx].time;
-          drawSegment(
-            t1,
-            t2,
-            sl.price,
-            isBroken ? `${RED}66` : `${RED}AA`,
-            isBroken ? LineStyle.Dotted : LineStyle.Dashed,
-            1,
-          );
-        }
-
-        // BoS: last broken swing high — prominent dotted green line
-        const brokenHighs = swingHighs.filter((sh) => {
-          const bIdx = findBreak(sh.idx, sh.price, true);
-          return bIdx < slice.length - 1;
-        });
-        if (brokenHighs.length > 0) {
-          const lastBH = brokenHighs[brokenHighs.length - 1];
-          const bIdx = findBreak(lastBH.idx, lastBH.price, true);
-          drawSegment(
-            slice[lastBH.idx].time,
-            slice[bIdx].time,
-            lastBH.price,
-            GREEN,
-            LineStyle.Dotted,
-            2,
-            "BoS",
-          );
-        }
-
-        // CHoCH: last broken swing low — prominent dotted red line
-        const brokenLows = swingLows.filter((sl) => {
-          const bIdx = findBreak(sl.idx, sl.price, false);
-          return bIdx < slice.length - 1;
-        });
-        if (brokenLows.length > 0) {
-          const lastBL = brokenLows[brokenLows.length - 1];
-          const bIdx = findBreak(lastBL.idx, lastBL.price, false);
-          drawSegment(
-            slice[lastBL.idx].time,
-            slice[bIdx].time,
-            lastBL.price,
-            RED,
-            LineStyle.Dotted,
-            2,
-            "CHoCH",
-          );
-        }
-
-        // Active (unbroken) strong/weak high/low
-        const lastClose = slice[slice.length - 1].close;
-        if (swingHighs.length > 0) {
-          const lh = swingHighs[swingHighs.length - 1];
-          const unbroken =
-            findBreak(lh.idx, lh.price, true) === slice.length - 1;
-          if (unbroken) {
+          // Draw bounded swing high segments
+          for (const sh of swingHighs.slice(-8)) {
+            const breakIdx = findBreak(sh.idx, sh.price, true);
+            const isBroken = breakIdx < slice.length - 1;
+            const t1 = slice[sh.idx].time;
+            const t2 = slice[breakIdx].time;
             drawSegment(
-              slice[lh.idx].time,
-              slice[slice.length - 1].time,
-              lh.price,
-              lastClose > lh.price ? GREEN : `${RED}CC`,
-              LineStyle.Solid,
-              2,
-              lastClose > lh.price ? "Weak High" : "Strong High",
+              t1,
+              t2,
+              sh.price,
+              isBroken ? `${GREEN}66` : `${GREEN}AA`,
+              isBroken ? LineStyle.Dotted : LineStyle.Dashed,
+              1,
             );
           }
-        }
-        if (swingLows.length > 0) {
-          const ll = swingLows[swingLows.length - 1];
-          const unbroken =
-            findBreak(ll.idx, ll.price, false) === slice.length - 1;
-          if (unbroken) {
+
+          // Draw bounded swing low segments
+          for (const sl of swingLows.slice(-8)) {
+            const breakIdx = findBreak(sl.idx, sl.price, false);
+            const isBroken = breakIdx < slice.length - 1;
+            const t1 = slice[sl.idx].time;
+            const t2 = slice[breakIdx].time;
             drawSegment(
-              slice[ll.idx].time,
-              slice[slice.length - 1].time,
-              ll.price,
-              lastClose < ll.price ? RED : `${GREEN}CC`,
-              LineStyle.Solid,
-              2,
-              lastClose < ll.price ? "Weak Low" : "Strong Low",
+              t1,
+              t2,
+              sl.price,
+              isBroken ? `${RED}66` : `${RED}AA`,
+              isBroken ? LineStyle.Dotted : LineStyle.Dashed,
+              1,
             );
+          }
+
+          // BoS: last broken swing high
+          const brokenHighs = swingHighs.filter((sh) => {
+            const bIdx = findBreak(sh.idx, sh.price, true);
+            return bIdx < slice.length - 1;
+          });
+          if (brokenHighs.length > 0) {
+            const lastBH = brokenHighs[brokenHighs.length - 1];
+            const bIdx = findBreak(lastBH.idx, lastBH.price, true);
+            drawSegment(
+              slice[lastBH.idx].time,
+              slice[bIdx].time,
+              lastBH.price,
+              GREEN,
+              LineStyle.Dotted,
+              2,
+              "BoS",
+            );
+          }
+
+          // CHoCH: last broken swing low
+          const brokenLows = swingLows.filter((sl) => {
+            const bIdx = findBreak(sl.idx, sl.price, false);
+            return bIdx < slice.length - 1;
+          });
+          if (brokenLows.length > 0) {
+            const lastBL = brokenLows[brokenLows.length - 1];
+            const bIdx = findBreak(lastBL.idx, lastBL.price, false);
+            drawSegment(
+              slice[lastBL.idx].time,
+              slice[bIdx].time,
+              lastBL.price,
+              RED,
+              LineStyle.Dotted,
+              2,
+              "CHoCH",
+            );
+          }
+
+          // Strong/Weak high/low
+          const lastClose = slice[slice.length - 1].close;
+          if (swingHighs.length > 0) {
+            const lh = swingHighs[swingHighs.length - 1];
+            const unbroken =
+              findBreak(lh.idx, lh.price, true) === slice.length - 1;
+            if (unbroken) {
+              drawSegment(
+                slice[lh.idx].time,
+                slice[slice.length - 1].time,
+                lh.price,
+                lastClose > lh.price ? GREEN : `${RED}CC`,
+                LineStyle.Solid,
+                2,
+                lastClose > lh.price ? "Weak High" : "Strong High",
+              );
+            }
+          }
+          if (swingLows.length > 0) {
+            const ll = swingLows[swingLows.length - 1];
+            const unbroken =
+              findBreak(ll.idx, ll.price, false) === slice.length - 1;
+            if (unbroken) {
+              drawSegment(
+                slice[ll.idx].time,
+                slice[slice.length - 1].time,
+                ll.price,
+                lastClose < ll.price ? RED : `${GREEN}CC`,
+                LineStyle.Solid,
+                2,
+                lastClose < ll.price ? "Weak Low" : "Strong Low",
+              );
+            }
           }
         }
       }
@@ -1502,17 +1556,11 @@ export function ChartPanel({
         chartRef.current = null;
       }
     };
-  }, [
-    klineData,
-    chartType,
-    selectedIndicators,
-    indicatorParams,
-    hiddenIndicators,
-    timeframe,
-  ]);
+  }, [klineData, chartType, instances, timeframe]);
 
-  const activePanelIndicators = PANEL_INDICATORS.filter((id) =>
-    selectedIndicators.has(id),
+  // Panel instances (sub-panel indicators)
+  const activePanelInstances = instances.filter(
+    (inst) => PANEL_INDICATORS.includes(inst.id) && !inst.hidden,
   );
 
   const chartTypeIcon = {
@@ -1529,8 +1577,6 @@ export function ChartPanel({
     { key: "trend", label: "TREND" },
     { key: "volume", label: "VOLUME" },
   ];
-
-  const allActive = [...selectedIndicators];
 
   return (
     <div
@@ -1629,7 +1675,7 @@ export function ChartPanel({
             </DropdownMenuContent>
           </DropdownMenu>
 
-          {/* Indicators */}
+          {/* Indicators — always ADD on click */}
           <Popover>
             <PopoverTrigger asChild>
               <Button
@@ -1642,7 +1688,8 @@ export function ChartPanel({
                 }}
                 data-ocid="chart.indicators.open_modal_button"
               >
-                Indicators ({selectedIndicators.size})
+                <Plus className="w-3 h-3" />
+                Indicators ({instances.length})
                 <ChevronDown className="w-3 h-3" />
               </Button>
             </PopoverTrigger>
@@ -1654,6 +1701,12 @@ export function ChartPanel({
               }}
               data-ocid="chart.indicators.popover"
             >
+              <p
+                className="text-[9px] mb-2 px-1"
+                style={{ color: "oklch(0.45 0.04 240)" }}
+              >
+                Click to add (multiple instances supported)
+              </p>
               {groupLabels.map(({ key, label }) => (
                 <div key={key}>
                   <p
@@ -1662,29 +1715,34 @@ export function ChartPanel({
                   >
                     {label}
                   </p>
-                  {INDICATOR_GROUPS[key].map((id) => (
-                    <button
-                      type="button"
-                      key={id}
-                      className="w-full flex items-center gap-2 px-1 py-1 rounded hover:bg-accent/60 cursor-pointer"
-                      onClick={() => toggleIndicator(id)}
-                    >
-                      <Checkbox
-                        id={`ind-${id}`}
-                        checked={selectedIndicators.has(id)}
-                        onCheckedChange={() => toggleIndicator(id)}
-                        className="w-3.5 h-3.5"
-                        data-ocid={`chart.indicator_${id.toLowerCase()}.checkbox`}
-                      />
-                      <Label
-                        htmlFor={`ind-${id}`}
-                        className="text-xs cursor-pointer"
+                  {INDICATOR_GROUPS[key].map((id) => {
+                    const count = instances.filter(
+                      (inst) => inst.id === id,
+                    ).length;
+                    return (
+                      <button
+                        type="button"
+                        key={id}
+                        className="w-full flex items-center justify-between px-2 py-1 rounded hover:bg-accent/60 cursor-pointer text-xs"
                         style={{ color: "#E8F0FA" }}
+                        onClick={() => addInstance(id)}
+                        data-ocid={`chart.indicator_${id.toLowerCase()}.button`}
                       >
-                        {INDICATOR_LABELS[id]}
-                      </Label>
-                    </button>
-                  ))}
+                        <span>{INDICATOR_LABELS[id]}</span>
+                        {count > 0 && (
+                          <span
+                            className="text-[9px] font-bold px-1.5 py-0.5 rounded-full"
+                            style={{
+                              background: "rgba(34,197,94,0.15)",
+                              color: GREEN,
+                            }}
+                          >
+                            {count}x
+                          </span>
+                        )}
+                      </button>
+                    );
+                  })}
                   <div
                     className="my-1"
                     style={{ borderTop: "1px solid oklch(0.22 0.03 240)" }}
@@ -1723,45 +1781,46 @@ export function ChartPanel({
 
         {selectedCoin && !isLoading && (
           <>
-            {/* Main chart with overlay settings panel */}
+            {/* Main chart with indicator overlay chips */}
             <div className="relative">
-              {/* Indicator settings overlay — top-left */}
-              {allActive.length > 0 && (
+              {/* Indicator instances overlay — top-left */}
+              {instances.length > 0 && (
                 <div
                   className="absolute top-2 left-2 z-10 flex flex-col gap-1"
-                  style={{ maxWidth: 220, pointerEvents: "auto" }}
+                  style={{ maxWidth: 240, pointerEvents: "auto" }}
                 >
-                  {allActive.map((id) => {
-                    const hidden = hiddenIndicators.has(id);
-                    const params = indicatorParams[id] ?? {};
-                    const paramKeys = Object.keys(params);
+                  {instances.map((inst) => {
+                    const instLabel = getInstanceLabel(inst, instances);
+                    const paramKeys = Object.keys(inst.params);
                     return (
                       <div
-                        key={id}
+                        key={inst.instanceId}
                         className="flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px]"
                         style={{
                           background: "rgba(10,21,32,0.88)",
                           border: "1px solid rgba(30,42,54,0.9)",
                           backdropFilter: "blur(4px)",
-                          opacity: hidden ? 0.5 : 1,
+                          opacity: inst.hidden ? 0.5 : 1,
                         }}
                       >
                         <span
                           className="font-semibold flex-1 truncate"
-                          style={{ color: hidden ? "#4A6070" : "#A8C0D0" }}
+                          style={{ color: inst.hidden ? "#4A6070" : "#A8C0D0" }}
                         >
-                          {getChipLabel(id, params)}
+                          {instLabel}
                         </span>
 
                         {/* Eye toggle */}
                         <button
                           type="button"
-                          onClick={() => toggleVisibility(id)}
+                          onClick={() =>
+                            toggleInstanceVisibility(inst.instanceId)
+                          }
                           className="opacity-60 hover:opacity-100 transition-opacity"
-                          title={hidden ? "Show" : "Hide"}
-                          data-ocid={`chart.indicator_${id.toLowerCase()}.toggle`}
+                          title={inst.hidden ? "Show" : "Hide"}
+                          data-ocid={`chart.indicator_${inst.instanceId.toLowerCase()}.toggle`}
                         >
-                          {hidden ? (
+                          {inst.hidden ? (
                             <EyeOff
                               className="w-3 h-3"
                               style={{ color: "#8FA4B8" }}
@@ -1774,7 +1833,7 @@ export function ChartPanel({
                           )}
                         </button>
 
-                        {/* Settings */}
+                        {/* Settings gear — always present since all indicators have params */}
                         {paramKeys.length > 0 && (
                           <Popover>
                             <PopoverTrigger asChild>
@@ -1782,7 +1841,7 @@ export function ChartPanel({
                                 type="button"
                                 className="opacity-60 hover:opacity-100 transition-opacity"
                                 title="Settings"
-                                data-ocid={`chart.indicator_${id.toLowerCase()}.open_modal_button`}
+                                data-ocid={`chart.indicator_${inst.instanceId.toLowerCase()}.open_modal_button`}
                               >
                                 <Settings2
                                   className="w-3 h-3"
@@ -1797,45 +1856,43 @@ export function ChartPanel({
                                 background: "oklch(0.14 0.03 240)",
                                 border: "1px solid oklch(0.22 0.03 240)",
                               }}
-                              data-ocid={`chart.indicator_${id.toLowerCase()}.popover`}
+                              data-ocid={`chart.indicator_${inst.instanceId.toLowerCase()}.popover`}
                             >
                               <p
                                 className="text-[10px] font-bold mb-2 tracking-wider"
                                 style={{ color: "#8FA4B8" }}
                               >
-                                {INDICATOR_LABELS[id]} SETTINGS
+                                {INDICATOR_LABELS[inst.id]} SETTINGS
                               </p>
                               <div className="space-y-2">
                                 {paramKeys.map((key) => (
-                                  <div
-                                    key={key}
-                                    className="flex items-center gap-2"
-                                  >
+                                  <div key={key}>
                                     <Label
-                                      className="text-[10px] capitalize w-20 flex-shrink-0"
+                                      className="text-[9px] font-semibold capitalize"
                                       style={{ color: "#8FA4B8" }}
                                     >
                                       {key}
                                     </Label>
                                     <Input
                                       type="number"
-                                      value={params[key]}
-                                      onChange={(e) =>
-                                        updateParam(
-                                          id,
-                                          key,
-                                          Number(e.target.value),
-                                        )
-                                      }
-                                      className="h-6 text-[11px] px-2"
+                                      value={inst.params[key]}
+                                      onChange={(e) => {
+                                        const v = Number(e.target.value);
+                                        if (!Number.isNaN(v) && v > 0) {
+                                          updateInstanceParam(
+                                            inst.instanceId,
+                                            key,
+                                            v,
+                                          );
+                                        }
+                                      }}
+                                      className="h-6 text-[11px] mt-0.5"
                                       style={{
-                                        background: "oklch(0.11 0.03 240)",
-                                        border:
-                                          "1px solid oklch(0.22 0.03 240)",
+                                        background: "oklch(0.18 0.035 240)",
+                                        borderColor: "oklch(0.28 0.03 240)",
                                         color: "#E8F0FA",
                                       }}
-                                      min={1}
-                                      data-ocid={`chart.indicator_${id.toLowerCase()}.input`}
+                                      data-ocid={`chart.indicator_${inst.instanceId.toLowerCase()}_${key}.input`}
                                     />
                                   </div>
                                 ))}
@@ -1847,10 +1904,10 @@ export function ChartPanel({
                         {/* Remove */}
                         <button
                           type="button"
-                          onClick={() => removeIndicator(id)}
+                          onClick={() => removeInstance(inst.instanceId)}
                           className="opacity-60 hover:opacity-100 transition-opacity"
                           title="Remove"
-                          data-ocid={`chart.indicator_${id.toLowerCase()}.close_button`}
+                          data-ocid={`chart.indicator_${inst.instanceId.toLowerCase()}.close_button`}
                         >
                           <X className="w-3 h-3" style={{ color: "#8FA4B8" }} />
                         </button>
@@ -1862,19 +1919,17 @@ export function ChartPanel({
               <div ref={mainContainerRef} style={{ height: 360 }} />
             </div>
 
-            {/* Sub-panel indicators (hidden ones are skipped) */}
-            {activePanelIndicators
-              .filter((id) => !hiddenIndicators.has(id))
-              .map((id) => (
-                <SubPanel
-                  key={id}
-                  indicatorId={id}
-                  klineData={klineData}
-                  mainChartRef={chartRef}
-                  params={indicatorParams[id] ?? {}}
-                  chartKey={chartKey}
-                />
-              ))}
+            {/* Sub-panel indicators */}
+            {activePanelInstances.map((inst) => (
+              <SubPanel
+                key={inst.instanceId}
+                instance={inst}
+                label={getInstanceLabel(inst, instances)}
+                klineData={klineData}
+                mainChartRef={chartRef}
+                chartKey={chartKey}
+              />
+            ))}
           </>
         )}
       </div>

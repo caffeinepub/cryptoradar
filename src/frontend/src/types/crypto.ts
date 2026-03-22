@@ -60,6 +60,10 @@ export interface SignalResult {
     signal: "buy" | "sell" | "neutral";
     value: string;
   }[];
+  entryPrice?: number;
+  takeProfitPrice?: number | null;
+  stopLossPrice?: number | null;
+  riskRewardRatio?: number | null;
 }
 
 export const OVERLAY_INDICATORS: IndicatorId[] = [

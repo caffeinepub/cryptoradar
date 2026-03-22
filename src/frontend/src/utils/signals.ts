@@ -11,26 +11,12 @@ import {
 } from "technicalindicators";
 import type { KlineData, SignalLabel, SignalResult } from "../types/crypto";
 
-function _calcATR(
-  highs: number[],
-  lows: number[],
-  closes: number[],
-  period = 14,
-): number[] {
-  const tr: number[] = [];
-  for (let i = 1; i < closes.length; i++) {
-    const h = highs[i];
-    const l = lows[i];
-    const pc = closes[i - 1];
-    tr.push(Math.max(h - l, Math.abs(h - pc), Math.abs(l - pc)));
-  }
-  const atr: number[] = [];
-  let sum = tr.slice(0, period).reduce((a, b) => a + b, 0);
-  atr.push(sum / period);
-  for (let i = period; i < tr.length; i++) {
-    atr.push((atr[atr.length - 1] * (period - 1) + tr[i]) / period);
-  }
-  return atr;
+export function fmtPrice(p: number): string {
+  if (p >= 1000)
+    return `$${p.toLocaleString("en-US", { maximumFractionDigits: 0 })}`;
+  if (p >= 1) return `$${p.toFixed(3)}`;
+  if (p >= 0.01) return `$${p.toFixed(5)}`;
+  return `$${p.toFixed(7)}`;
 }
 
 function calcPSAR(
@@ -115,6 +101,13 @@ export function computeSignal(klineData: KlineData[]): SignalResult {
       confidence: 0,
       strategies: [],
       details: [],
+      entryPrice:
+        klineData.length > 0
+          ? klineData[klineData.length - 1].close
+          : undefined,
+      takeProfitPrice: null,
+      stopLossPrice: null,
+      riskRewardRatio: null,
     };
   }
 
@@ -390,7 +383,59 @@ export function computeSignal(klineData: KlineData[]): SignalResult {
   else if (score >= 25) label = "SELL";
   else label = "STRONG SELL";
 
-  return { score, label, confidence, strategies, details };
+  // --- Price levels: entry, take profit, stop loss ---
+  const lastClose = klineData[klineData.length - 1].close;
+
+  // ATR for SL/TP calculation
+  const atrPeriod = 14;
+  let atrValue = lastClose * 0.02; // fallback 2%
+  if (klineData.length > atrPeriod + 1) {
+    const trs: number[] = [];
+    for (let i = 1; i < klineData.length; i++) {
+      trs.push(
+        Math.max(
+          klineData[i].high - klineData[i].low,
+          Math.abs(klineData[i].high - klineData[i - 1].close),
+          Math.abs(klineData[i].low - klineData[i - 1].close),
+        ),
+      );
+    }
+    const recentTRs = trs.slice(-atrPeriod);
+    atrValue = recentTRs.reduce((a, b) => a + b, 0) / recentTRs.length;
+  }
+
+  const isBuySignal = score >= 55;
+  const isSellSignal = score <= 45;
+
+  const entryPrice = lastClose;
+  let takeProfitPrice: number | null = null;
+  let stopLossPrice: number | null = null;
+
+  if (isBuySignal) {
+    takeProfitPrice = lastClose + atrValue * 2.5 * (score / 70);
+    stopLossPrice = lastClose - atrValue * 1.2;
+  } else if (isSellSignal) {
+    takeProfitPrice = lastClose - atrValue * 2.5 * ((100 - score) / 70);
+    stopLossPrice = lastClose + atrValue * 1.2;
+  }
+
+  const riskRewardRatio =
+    takeProfitPrice !== null && stopLossPrice !== null
+      ? Math.abs(takeProfitPrice - entryPrice) /
+        Math.abs(stopLossPrice - entryPrice)
+      : null;
+
+  return {
+    score,
+    label,
+    confidence,
+    strategies,
+    details,
+    entryPrice,
+    takeProfitPrice,
+    stopLossPrice,
+    riskRewardRatio,
+  };
 }
 
 export function getSignalColors(label: SignalLabel): {
